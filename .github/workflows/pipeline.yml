@@ -1,5 +1,8 @@
 name: Build Scan Deploy
-on: [push, workflow_dispatch]
+
+on:
+  push:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -8,8 +11,10 @@ permissions:
 jobs:
   pipeline:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Download repository
+        uses: actions/checkout@v4
 
       - name: Set image name
         run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_SHA}" >> "$GITHUB_ENV"
@@ -17,19 +22,34 @@ jobs:
       - name: Build image
         run: docker build -t "$IMAGE" .
 
-      - name: Scan image and create SBOM before push
+      - name: Scan image and create SBOM
         run: |
-          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/work" aquasec/trivy:0.69.3 image --format json --output /work/trivy.json "$IMAGE"
-          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/work" aquasec/trivy:0.69.3 image --format cyclonedx --output /work/sbom.json "$IMAGE"
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD:/work" \
+            aquasec/trivy:0.69.3 image \
+            --format json \
+            --output /work/trivy.json \
+            "$IMAGE"
 
-      - uses: actions/upload-artifact@v4
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD:/work" \
+            aquasec/trivy:0.69.3 image \
+            --format cyclonedx \
+            --output /work/sbom.json \
+            "$IMAGE"
+
+      - name: Upload security reports
+        uses: actions/upload-artifact@v4
         with:
           name: security-reports
           path: |
             trivy.json
             sbom.json
 
-      - uses: docker/login-action@v3
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -38,8 +58,14 @@ jobs:
       - name: Push scanned image
         run: docker push "$IMAGE"
 
-      - name: Create temporary Kubernetes cluster
-        uses: engineerd/setup-kind@v0.6.0
+      - name: Install kind
+        run: |
+          curl -Lo kind https://kind.sigs.k8s.io/dl/v0.32.0/kind-linux-amd64
+          chmod +x kind
+          sudo mv kind /usr/local/bin/kind
+
+      - name: Create Kubernetes cluster
+        run: kind create cluster
 
       - name: Deploy and validate rollout
         run: |
