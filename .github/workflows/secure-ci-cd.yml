@@ -1,0 +1,195 @@
+name: Secure CI/CD Pipeline
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: secure-pipeline-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.13"
+  TRIVY_VERSION: "0.71.0"
+  KIND_VERSION: "v0.31.0"
+  LOCAL_IMAGE: "secure-web:${{ github.sha }}"
+  BASELINE_IMAGE: "secure-web:baseline"
+
+jobs:
+  verify:
+    name: Test, scan and deploy to Kubernetes
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install test dependencies
+        run: python -m pip install --requirement requirements-dev.txt
+
+      - name: Run unit tests
+        run: pytest
+
+      - name: Build baseline and candidate images
+        run: |
+          BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          docker build \
+            --build-arg APP_VERSION=baseline \
+            --build-arg VCS_REF=baseline \
+            --build-arg BUILD_TIME="$BUILD_TIME" \
+            --tag "$BASELINE_IMAGE" .
+          docker build \
+            --build-arg APP_VERSION="sha-${GITHUB_SHA::12}" \
+            --build-arg VCS_REF="$GITHUB_SHA" \
+            --build-arg BUILD_TIME="$BUILD_TIME" \
+            --tag "$LOCAL_IMAGE" .
+
+      - name: Install checksum-verified Trivy release
+        run: ./scripts/install-trivy.sh
+
+      - name: Scan candidate image
+        id: trivy_scan
+        continue-on-error: true
+        run: |
+          mkdir -p artifacts
+          trivy image \
+            --ignore-unfixed \
+            --severity HIGH,CRITICAL \
+            --format json \
+            --output artifacts/trivy-image.json \
+            "$LOCAL_IMAGE"
+          trivy image \
+            --ignore-unfixed \
+            --severity CRITICAL \
+            --exit-code 1 \
+            "$LOCAL_IMAGE" | tee artifacts/trivy-gate.txt
+
+      - name: Generate CycloneDX SBOM
+        if: always()
+        run: |
+          mkdir -p artifacts
+          trivy image \
+            --format cyclonedx \
+            --output artifacts/sbom.cdx.json \
+            "$LOCAL_IMAGE"
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          report = json.loads(Path("artifacts/sbom.cdx.json").read_text())
+          assert report["bomFormat"] == "CycloneDX"
+          assert report.get("components"), "SBOM has no components"
+          print(f"SBOM contains {len(report['components'])} components")
+          PY
+
+      - name: Upload security evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-evidence-${{ github.sha }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Enforce vulnerability gate
+        if: steps.trivy_scan.outcome == 'failure'
+        run: |
+          echo "Critical vulnerabilities exceeded the pipeline policy." >&2
+          exit 1
+
+      - name: Install kind
+        env:
+          KIND_VERSION: ${{ env.KIND_VERSION }}
+        run: ./scripts/install-kind.sh
+
+      - name: Display Kubernetes client version
+        run: kubectl version --client
+
+      - name: Verify rolling deployment and self-healing
+        env:
+          BASELINE_IMAGE: ${{ env.BASELINE_IMAGE }}
+          CANDIDATE_IMAGE: ${{ env.LOCAL_IMAGE }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: ./scripts/kubernetes-e2e.sh
+
+      - name: Upload Kubernetes test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kubernetes-evidence-${{ github.sha }}
+          path: |
+            build/*.json
+            build/*.txt
+            build/*.log
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Save the exact scanned image
+        run: docker save "$LOCAL_IMAGE" --output candidate-image.tar
+
+      - name: Upload verified image for publication
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-container-image-${{ github.sha }}
+          path: candidate-image.tar
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+      - name: Write workflow summary
+        if: always()
+        run: |
+          {
+            echo "## Secure pipeline summary"
+            echo "- Unit tests: completed"
+            echo "- Container image: $LOCAL_IMAGE"
+            echo "- Trivy gate result: ${{ steps.trivy_scan.outcome }}"
+            echo "- SBOM format: CycloneDX JSON"
+            echo "- Kubernetes rollout, availability and self-healing evidence: uploaded as artifacts"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: Publish verified image to GHCR
+    if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Download verified container image
+        uses: actions/download-artifact@v4
+        with:
+          name: verified-container-image-${{ github.sha }}
+
+      - name: Load exact image tested by verify job
+        run: docker load --input candidate-image.tar
+
+      - name: Authenticate to GitHub Container Registry
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Push immutable commit tag
+        env:
+          IMAGE_NAME: ghcr.io/${{ github.repository }}
+        run: |
+          short_sha=${GITHUB_SHA::12}
+          target="$IMAGE_NAME:sha-$short_sha"
+          docker tag "$LOCAL_IMAGE" "$target"
+          docker push "$target" | tee push-output.txt
+          echo "Published $target" >> "$GITHUB_STEP_SUMMARY"

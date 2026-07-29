@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Secure Kubernetes delivery pipeline demonstration">
+    <title>Secure Delivery Pipeline</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  </head>
+  <body>
+    <main class="card">
+      <p class="eyebrow">AUTOMATED SECURE DEPLOYMENT</p>
+      <h1>The application is healthy.</h1>
+      <p>
+        This response is being served by a non-root container deployed with a
+        Kubernetes rolling-update strategy and health probes.
+      </p>
+      <dl>
+        <div><dt>Version</dt><dd>{{ version }}</dd></div>
+        <div><dt>Commit</dt><dd>{{ commit_sha }}</dd></div>
+        <div><dt>Pod</dt><dd>{{ hostname }}</dd></div>
+      </dl>
+      <nav aria-label="Service endpoints">
+        <a href="/health/live">Liveness</a>
+        <a href="/health/ready">Readiness</a>
+        <a href="/version">Version</a>
+      </nav>
+    </main>
+  </body>
+</html>

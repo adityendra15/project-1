@@ -1,48 +1,164 @@
-# Project 1 — Minimal Automated Secure Deployment
+# Automated Secure Website Deployment Pipeline
 
-## What it proves
+A reproducible CI/CD project that tests a Python website, builds a hardened container,
+scans it before registry publication, generates a CycloneDX SBOM, deploys it to a real
+Kubernetes cluster created inside CI, validates rolling-update availability, and proves
+that Kubernetes replaces a failed Pod.
 
-On every GitHub push, the workflow:
+This repository is intentionally designed so its claims can be demonstrated rather than
+only described.
 
-1. Builds a Docker image.
-2. Scans it with Trivy.
-3. Generates a CycloneDX SBOM before pushing.
-4. Pushes the image to GitHub Container Registry.
-5. Creates a temporary Kubernetes cluster and deploys two replicas.
-6. validates a rolling restart using readiness and liveness probes.
-7. Deletes one pod and confirms Kubernetes returns to two running pods.
+## What the pipeline proves
 
-## Only four files matter
+| Resume claim | Executable evidence |
+|---|---|
+| Build on every push | `.github/workflows/secure-ci-cd.yml` triggers on pushes and pull requests. |
+| Create a Docker image | The `verify` job builds baseline and candidate images. |
+| Scan before registry push | Trivy runs in `verify`; `publish` cannot run unless `verify` succeeds. |
+| Generate an SBOM | Trivy produces `artifacts/sbom.cdx.json`, uploaded from every run. |
+| Deploy to Kubernetes automatically | CI creates a kind cluster and applies the manifests without manual commands. |
+| Validate each rollout | `kubectl rollout status` and replica checks fail the job on a stalled rollout. |
+| Reduce rollout downtime | Three replicas, readiness probes, `maxUnavailable: 0`, and continuous HTTP requests are tested. |
+| Self-healing | The test deletes a Pod and verifies that the Deployment returns to three ready replicas. |
+| Safe failed rollout | CI attempts a deliberately broken image update and verifies that requests continue before rollback. |
 
-- `index.html`: the one-line website.
-- `Dockerfile`: packages and starts the website.
-- `k8s.yaml`: tells Kubernetes how to run it.
-- `.github/workflows/pipeline.yml`: automates everything.
+## Architecture
 
-## Run locally on your Mac
-
-Install Docker Desktop, open Terminal in this folder, then run:
-
-```bash
-docker build -t project1 .
-docker run --rm -p 8080:8080 project1
+```text
+Git push / pull request
+        |
+        v
+Unit tests -> Docker build -> Trivy reports -> Critical-CVE gate -> CycloneDX SBOM
+                                                        |
+                                                        v
+                                             Temporary kind cluster
+                                                        |
+                baseline deploy -> continuous requests -> rolling update
+                                                        |
+                              Pod deletion -> replacement verification
+                                                        |
+                     broken rollout -> availability check -> rollback
+                                                        |
+                                                        v
+                         exact tested image artifact -> GHCR on the default branch
 ```
 
-Open `http://localhost:8080`. Stop it with `Control + C`.
+## Application endpoints
 
-## Run the full pipeline
+| Endpoint | Purpose |
+|---|---|
+| `/` | Human-readable deployment page. |
+| `/health/live` | Tells Kubernetes whether the process should be restarted. |
+| `/health/ready` | Tells Kubernetes whether the Pod should receive traffic. |
+| `/version` | Shows version, commit, build time and Pod hostname. |
 
-1. Create a new public GitHub repository.
-2. Upload every file, including the hidden `.github` folder.
-3. Commit the files.
-4. Open the repository's **Actions** tab.
-5. Open **Build Scan Deploy** and watch each step.
-6. Download the `security-reports` artifact to show `trivy.json` and `sbom.json`.
+## Local prerequisites
 
-## What to say in the interview
+- Python 3.13
+- Docker
+- kubectl
+- kind
+- curl
+- Trivy
 
-> This is a small proof-of-concept CI/CD pipeline. A GitHub push triggers the workflow. It builds a BusyBox web-server image, scans the image with Trivy, generates a CycloneDX SBOM, pushes the scanned image to GHCR, and deploys it to a temporary kind Kubernetes cluster. The Deployment has two replicas, readiness and liveness probes, and a rolling-update strategy with maxUnavailable set to zero. The workflow restarts the Deployment and deletes a pod to demonstrate rollout validation and self-healing.
+The GitHub workflow installs checksum-verified kind and Trivy releases automatically.
+For local use, install those tools first or run `scripts/install-kind.sh` and
+`scripts/install-trivy.sh` on Linux.
 
-## Honest limitation
+## Fast local test
 
-This demonstrates the mechanism in a temporary test cluster. It is not a production cloud deployment and it does not run a real load test. Say it is a **functional proof of concept designed for learning**.
+```bash
+./scripts/install-kind.sh
+./scripts/install-trivy.sh
+./scripts/local-test.sh
+```
+
+The script runs unit tests, builds two images, performs the blocking vulnerability scan,
+generates the SBOM, deploys to kind, monitors a rollout, deletes a Pod to show
+self-healing, and verifies that an intentionally broken rollout does not interrupt the
+healthy Service.
+
+To inspect the cluster after the script finishes:
+
+```bash
+KEEP_CLUSTER=true ./scripts/local-test.sh
+kubectl -n secure-web get deployment,pods,service,pdb -o wide
+kind delete cluster --name secure-pipeline-ci
+```
+
+## Run only the application
+
+```bash
+make install
+make run
+curl http://127.0.0.1:8080/version
+```
+
+Or with Docker:
+
+```bash
+docker build -t secure-web:local .
+docker run --rm -p 8080:8080 secure-web:local
+```
+
+## Vulnerability policy
+
+The pipeline always records HIGH and CRITICAL findings in JSON. It blocks publication
+when Trivy reports a **fixable CRITICAL** vulnerability. `--ignore-unfixed` is used so the
+policy does not fail on an issue for which no patched package exists. This is a project
+policy decision, not a claim that unfixed vulnerabilities are harmless.
+
+## Why the image is saved between jobs
+
+The `verify` job saves the exact Docker image it scanned and deployed. The `publish` job
+loads that artifact and pushes it to GHCR. It does not rebuild the image after scanning,
+which prevents a gap where one image is tested and a different image is published.
+
+## Kubernetes availability design
+
+- Three replicas keep capacity during updates.
+- The rolling strategy uses `maxUnavailable: 0` and `maxSurge: 1`.
+- Readiness removes a Pod from Service endpoints before it is safe to receive traffic.
+- Liveness restarts a process that becomes unhealthy.
+- A startup probe prevents premature liveness failures during startup.
+- `preStop` plus a termination grace period gives traffic time to drain.
+- A PodDisruptionBudget requests that two replicas remain available during voluntary disruption.
+
+These controls reduce the risk of downtime. The automated request monitor is the evidence
+for the tested scenario; no finite test can guarantee zero downtime in every possible
+infrastructure failure.
+
+## Evidence produced by GitHub Actions
+
+Every workflow run uploads:
+
+- Trivy JSON report
+- Trivy gate output
+- CycloneDX SBOM
+- rolling-update availability report
+- failed-rollout availability report
+- self-healing report
+- final Kubernetes state
+- port-forward log
+
+## Repository guide
+
+- `app/` — website and health endpoints
+- `tests/` — unit tests
+- `Dockerfile` — multi-stage, non-root container
+- `k8s/` — Deployment, Service, ServiceAccount and PodDisruptionBudget
+- `scripts/` — rendering and executable verification
+- `.github/workflows/` — complete automated pipeline
+- `docs/CLAIM-MAPPING.md` — exact evidence for each resume statement
+- `docs/INTERVIEW-GUIDE.md` — concepts you must be able to explain
+- `docs/TESTING.md` — manual and automated demonstrations
+
+## Known limitations
+
+- CI deploys to an ephemeral kind cluster, not a long-lived production cloud cluster.
+- The example publishes only the immutable commit tag; production systems normally add
+  promotion environments, approvals, signatures, provenance and registry retention rules.
+- kind's default networking does not enforce Kubernetes NetworkPolicy, so this repository
+  does not claim network-policy enforcement.
+- A successful availability test demonstrates the tested rollout conditions; it is not a
+  universal mathematical guarantee.
