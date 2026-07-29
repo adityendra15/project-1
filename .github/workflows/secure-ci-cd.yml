@@ -176,7 +176,7 @@ jobs:
 
     steps:
       - name: Download verified container image
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: verified-container-image-${{ github.sha }}
 
