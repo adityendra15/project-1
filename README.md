@@ -67,11 +67,14 @@ For local use, install those tools first or run `scripts/install-kind.sh` and
 
 ## Fast local test
 
+After installing the prerequisites listed above, run:
+
 ```bash
-./scripts/install-kind.sh
-./scripts/install-trivy.sh
 ./scripts/local-test.sh
 ```
+
+The two installer scripts are used by the Linux GitHub Actions runner. On macOS, install
+`kind` and Trivy with Homebrew before running the local test.
 
 The script runs unit tests, builds two images, performs the blocking vulnerability scan,
 generates the SBOM, deploys to kind, monitors a rollout, deletes a Pod to show
@@ -89,8 +92,15 @@ kind delete cluster --name secure-pipeline-ci
 ## Run only the application
 
 ```bash
-make install
-make run
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --requirement requirements-dev.txt
+APP_VERSION=local flask --app app.main run --host 0.0.0.0 --port 8080
+```
+
+In a second terminal:
+
+```bash
 curl http://127.0.0.1:8080/version
 ```
 
@@ -139,7 +149,6 @@ Every workflow run uploads:
 - failed-rollout availability report
 - self-healing report
 - final Kubernetes state
-- port-forward log
 
 ## Repository guide
 
@@ -149,9 +158,8 @@ Every workflow run uploads:
 - `k8s/` — Deployment, Service, ServiceAccount and PodDisruptionBudget
 - `scripts/` — rendering and executable verification
 - `.github/workflows/` — complete automated pipeline
-- `docs/CLAIM-MAPPING.md` — exact evidence for each resume statement
-- `docs/INTERVIEW-GUIDE.md` — concepts you must be able to explain
-- `docs/TESTING.md` — manual and automated demonstrations
+- `README.md` — architecture, operation, evidence and limitations
+- `SECURITY.md` — security policy and responsible reporting guidance
 
 ## Known limitations
 
