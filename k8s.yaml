@@ -17,15 +17,54 @@ spec:
         app: web
     spec:
       containers:
-        - name: web
-          image: IMAGE_PLACEHOLDER
-          imagePullPolicy: IfNotPresent
-          ports:
-            - containerPort: 8080
-          readinessProbe:
-            httpGet: {path: /, port: 8080}
-          livenessProbe:
-            httpGet: {path: /, port: 8080}
+      - name: web
+        image: IMAGE_PLACEHOLDER
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+
+        # NEW: without these, this pod has no resource footprint at all in
+        # Kubernetes' eyes -- it gets the lowest-priority "BestEffort" QoS
+        # class and is the first thing evicted if a node runs low on
+        # resources. These values are deliberately small (this serves one
+        # static file) but present, so the pod gets a real "Burstable" QoS
+        # class instead.
+        resources:
+          requests:
+            cpu: 25m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+
+        # NEW: enforces, at the Kubernetes level, what the Dockerfile's
+        # `USER 1000` already does at the image level -- defense in depth.
+        # runAsUser: 1000 matches the Dockerfile exactly, so this can't
+        # conflict with anything the image already does.
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+
+        # CHANGED: same endpoint as before (the app has no separate
+        # health logic to check), but now genuinely different timing --
+        # readiness reacts fast, to pull a struggling pod out of traffic
+        # quickly; liveness is slower and more tolerant, so a brief blip
+        # doesn't trigger an unnecessary restart. Two probes checking the
+        # same URL isn't wrong -- it's only a problem if they also behave
+        # identically, which they no longer do.
+        readinessProbe:
+          httpGet: {path: /, port: 8080}
+          initialDelaySeconds: 1
+          periodSeconds: 3
+          failureThreshold: 2
+        livenessProbe:
+          httpGet: {path: /, port: 8080}
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          failureThreshold: 3
 ---
 apiVersion: v1
 kind: Service
@@ -35,5 +74,5 @@ spec:
   selector:
     app: web
   ports:
-    - port: 80
-      targetPort: 8080
+  - port: 80
+    targetPort: 8080
