@@ -99,7 +99,7 @@ jobs:
 
       - name: Upload security evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: security-evidence-${{ github.sha }}
           path: artifacts/
@@ -130,7 +130,7 @@ jobs:
 
       - name: Upload Kubernetes test evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: kubernetes-evidence-${{ github.sha }}
           path: |
@@ -144,7 +144,7 @@ jobs:
         run: docker save "$LOCAL_IMAGE" --output candidate-image.tar
 
       - name: Upload verified image for publication
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: verified-container-image-${{ github.sha }}
           path: candidate-image.tar
