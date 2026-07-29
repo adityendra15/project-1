@@ -12,7 +12,7 @@ python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install --requirement requirements-dev.txt
-pytest
+python -m pytest
 
 build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 docker build \
